@@ -34,11 +34,32 @@ const DOOR_COLOR = '#e94560';     // Red accent
 // Wall color
 const WALL_COLOR = '#0f3460';
 
+// Obstacle (rectangle to move around; color/size distinct from player and door)
+const OBSTACLE_X = ROOM_LEFT + ROOM_WIDTH * 0.45;
+const OBSTACLE_Y = ROOM_TOP + ROOM_HEIGHT * 0.25;
+const OBSTACLE_WIDTH = 120;
+const OBSTACLE_HEIGHT = 100;
+const OBSTACLE_COLOR = '#ff9f43';  // Orange
+
+// Auto-toggle reversed controls: random interval between 7 and 10 seconds (in ms)
+const AUTO_REVERSE_MIN_MS = 7000;
+const AUTO_REVERSE_MAX_MS = 10000;
+
+/** Returns a random number of ms between AUTO_REVERSE_MIN_MS and AUTO_REVERSE_MAX_MS */
+function getNextAutoReverseDelay() {
+  return AUTO_REVERSE_MIN_MS + Math.random() * (AUTO_REVERSE_MAX_MS - AUTO_REVERSE_MIN_MS);
+}
+
 // ========== Game state ==========
-let playerX = ROOM_LEFT + 60;
+// Player starts on the far left so they have to cross more of the room to reach the door
+let playerX = ROOM_LEFT + 25;
 let playerY = ROOM_TOP + (ROOM_HEIGHT - PLAYER_SIZE) / 2;
 let reversedControls = false;
 let gameWon = false;
+
+// Auto-toggle timer: when we last auto-toggled, and delay until next auto-toggle
+let lastAutoReverseTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+let nextAutoReverseDelay = getNextAutoReverseDelay();
 
 // Keys currently held (for smooth movement)
 const keys = { w: false, a: false, s: false, d: false };
@@ -83,8 +104,16 @@ function updatePlayer() {
     if (keys.d) dx += PLAYER_SPEED;
   }
 
+  const prevX = playerX;
+  const prevY = playerY;
   playerX += dx;
   playerY += dy;
+
+  // If new position overlaps obstacle, revert to previous position (player must go around)
+  if (overlapsObstacle(playerX, playerY)) {
+    playerX = prevX;
+    playerY = prevY;
+  }
 
   // Clamp player inside room (with padding for player size)
   const minX = ROOM_LEFT;
@@ -94,6 +123,14 @@ function updatePlayer() {
 
   playerX = Math.max(minX, Math.min(maxX, playerX));
   playerY = Math.max(minY, Math.min(maxY, playerY));
+}
+
+// ========== Collision: player vs obstacle (AABB) ==========
+/** Returns true if a box at (x, y) with size PLAYER_SIZE overlaps the obstacle. */
+function overlapsObstacle(x, y) {
+  const ps = PLAYER_SIZE;
+  return x + ps > OBSTACLE_X && x < OBSTACLE_X + OBSTACLE_WIDTH &&
+         y + ps > OBSTACLE_Y && y < OBSTACLE_Y + OBSTACLE_HEIGHT;
 }
 
 // ========== Collision: player vs door (AABB) ==========
@@ -106,6 +143,17 @@ function checkDoorCollision() {
   if (px + ps > DOOR_X && px < DOOR_X + DOOR_WIDTH &&
       py + ps > DOOR_Y && py < DOOR_Y + DOOR_HEIGHT) {
     gameWon = true;
+  }
+}
+
+// ========== Auto-toggle reversed controls (every 7–10 s, random) ==========
+function updateAutoReverse() {
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const elapsed = now - lastAutoReverseTime;
+  if (elapsed >= nextAutoReverseDelay) {
+    reversedControls = !reversedControls;
+    lastAutoReverseTime = now;
+    nextAutoReverseDelay = getNextAutoReverseDelay();
   }
 }
 
@@ -132,6 +180,15 @@ function drawDoor() {
   ctx.strokeRect(DOOR_X, DOOR_Y, DOOR_WIDTH, DOOR_HEIGHT);
 }
 
+/** Draw the obstacle rectangle (player must move around it). */
+function drawObstacle() {
+  ctx.fillStyle = OBSTACLE_COLOR;
+  ctx.fillRect(OBSTACLE_X, OBSTACLE_Y, OBSTACLE_WIDTH, OBSTACLE_HEIGHT);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(OBSTACLE_X, OBSTACLE_Y, OBSTACLE_WIDTH, OBSTACLE_HEIGHT);
+}
+
 function drawPlayer() {
   ctx.fillStyle = PLAYER_COLOR;
   ctx.fillRect(playerX, playerY, PLAYER_SIZE, PLAYER_SIZE);
@@ -147,7 +204,7 @@ function drawUI() {
 
   if (reversedControls) {
     ctx.fillStyle = '#ffc107';
-    ctx.fillText('Reversed controls ON (R to toggle)', 20, CANVAS_HEIGHT - 20);
+    ctx.fillText('Reversed controls ON!', 20, CANVAS_HEIGHT - 20);
   }
 
   if (gameWon) {
@@ -160,10 +217,12 @@ function drawUI() {
 
 // ========== Main game loop (~60fps via requestAnimationFrame) ==========
 function gameLoop() {
+  updateAutoReverse();
   updatePlayer();
   checkDoorCollision();
 
   drawRoom();
+  drawObstacle();
   drawDoor();
   drawPlayer();
   drawUI();
