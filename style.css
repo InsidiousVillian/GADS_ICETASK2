@@ -1,0 +1,41 @@
+/* Game container and canvas styling */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #1a1a2e;
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #eee;
+}
+
+main {
+  text-align: center;
+}
+
+h1 {
+  margin-bottom: 0.5rem;
+  font-size: 1.5rem;
+  color: #e94560;
+}
+
+.instructions {
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+#gameCanvas {
+  display: block;
+  margin: 0 auto;
+  background: #16213e;
+  border: 3px solid #e94560;
+  border-radius: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}

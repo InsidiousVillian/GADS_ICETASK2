@@ -1,0 +1,5 @@
+Browser: Chrome / Firefox / Edge
+No engine required
+JavaScript (ES6)
+HTML5 Canvas
+Optional: CSS3 for styling
