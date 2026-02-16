@@ -1,23 +1,36 @@
-# Controls Not Included
+Decoy Portal Feature
+Overview
 
-## Overview
-Experimental puzzle game where rules change unexpectedly. Player must adapt and solve puzzles in a minimalist test chamber environment.
+Dynamic arena feature introducing risk/reward mechanics. Players entering the portal may be sent back to the start of the round (penalty) or receive a temporary shield buff (reward) that lasts until colliding with an obstacle, which is then destroyed. Encourages strategic decision-making and adds tension to arena gameplay.
 
-## How to Play
-- WASD – Move
-- Space – Jump (optional)
-- Reach the exit door while adapting to changing game rules.
+How to Play
 
-## Run
-- Open `index.html` in a browser
-- Game is immediately playable
+Approach a Decoy Portal carefully – it may:
 
-## AI Tools Used
-- Cursor – code generation & debugging
-- Meshy – 3D art assets (optional)
-- Soundraw – music & SFX
-- ChatGPT – documentation & ideation
+Teleport you back to the start of the round.
 
-## Credits
-- Developer: Jet Kingston
-- AI collaborators: Cursor, Meshy, Soundraw, ChatGPT
+Grant a shield buff until you hit an obstacle.
+
+Use the shield buff strategically to pass through obstacles safely.
+
+Visual and audio cues indicate shield activation and loss.
+
+Run
+
+Integrate the DecoyPortal object in the arena scene.
+
+Portals can be randomized or manually assigned for teleport/shield effects.
+
+Shield interactions rely on obstacle collision detection for proper behavior.
+
+AI Tools Used
+
+Cursor – code generation & debugging
+
+ChatGPT – documentation & ideation
+
+Credits
+
+Developer: Jet Kingston
+
+AI collaborators: Cursor, ChatGPT
