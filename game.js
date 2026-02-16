@@ -13,12 +13,18 @@ const ctx = canvas.getContext('2d');
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 600;
 
-// Room (play area) - inner rectangle; walls are the border
-const ROOM_PADDING = 40;
-const ROOM_LEFT = ROOM_PADDING;
-const ROOM_TOP = ROOM_PADDING;
-const ROOM_WIDTH = CANVAS_WIDTH - ROOM_PADDING * 2;
-const ROOM_HEIGHT = CANVAS_HEIGHT - ROOM_PADDING * 2;
+// Room (play area) - inner rectangle; walls + HUD are outside this.
+// Performance/UI note:
+// We intentionally reserve a taller TOP padding so tutorial speech bubbles and
+// other UI can live OUTSIDE the arena (no overlap with tiles or gameplay).
+const ROOM_PADDING_X = 40;
+const ROOM_PADDING_TOP = 120;     // HUD area (tutorial bubble lives here)
+const ROOM_PADDING_BOTTOM = 40;
+
+const ROOM_LEFT = ROOM_PADDING_X;
+const ROOM_TOP = ROOM_PADDING_TOP;
+const ROOM_WIDTH = CANVAS_WIDTH - ROOM_PADDING_X * 2;
+const ROOM_HEIGHT = CANVAS_HEIGHT - ROOM_PADDING_TOP - ROOM_PADDING_BOTTOM;
 
 // Door appearance delay to prevent camping at the starting position.
 // The door will NOT be drawn for the first 3 seconds of each round.
@@ -116,6 +122,12 @@ let doorY = 0;
 // Obstacles now include movement and behavior flags:
 // { x, y, width, height, vx, vy, zigzagPhase }
 let obstacles = [];
+// Fake doors / decoy exits that visually resemble exits but simply reset the player.
+// Each fake door is just a simple AABB: { x, y, width, height }.
+let fakeDoors = [];
+// Remember the player's spawn position so fake doors can reset the player cleanly.
+let playerStartX = 0;
+let playerStartY = 0;
 let reversedControls = false;
 let gameWon = false;
 let gameLost = false;
@@ -143,6 +155,9 @@ let nextAutoReverseDelay = getNextAutoReverseDelay();
 let currentRoundRule = 'none';
 
 // Tutorial flags for the early rounds.
+//  - showingTutorial: whether the large speech-bubble style overlay should be drawn.
+//  - tutorialMessage: the main line of text to show inside that bubble.
+// These are only used for rounds 1 and 2 and are explicitly disabled afterwards.
 let showingTutorial = true;
 let tutorialMessage = '';
 
@@ -152,6 +167,22 @@ let screenShakeIntensity = 0;
 
 // Keys currently held (for smooth movement)
 const keys = { w: false, a: false, s: false, d: false };
+
+// ========== Round transition cleanup / timer safety ==========
+// We keep a handle to the "advance to next round" timeout so we can cancel it
+// if the player restarts quickly (or if the round is regenerated for any reason).
+let nextRoundTimeoutId = null;
+
+/**
+ * Clears any pending "advance to next round" timer.
+ * This prevents multiple timeouts from stacking up (memory + logic leak).
+ */
+function clearPendingRoundTransition() {
+  if (nextRoundTimeoutId !== null) {
+    clearTimeout(nextRoundTimeoutId);
+    nextRoundTimeoutId = null;
+  }
+}
 
 // ========== Simple audio feedback (optional) ==========
 // Lightweight Web Audio beep used when reversed controls toggle (manual + auto).
@@ -202,6 +233,10 @@ function playReverseToggleSound() {
  * - Randomizes obstacle positions and sizes
  */
 function generateRandomRoom() {
+  // ---- Memory / state cleanup for new rounds ----
+  // Clear any pending timers from the previous round (e.g. win transition).
+  clearPendingRoundTransition();
+
   // Reset game state
   gameWon = false;
   gameLost = false;
@@ -218,13 +253,16 @@ function generateRandomRoom() {
   // Rounds 1–2 are reserved for tutorial and stay mostly normal.
   if (currentRound === 1) {
     currentRoundRule = 'none';
+    // Enable tutorial bubble for the very first round: explain basic movement.
     showingTutorial = true;
     tutorialMessage = 'Round 1: Use W A S D to move.';
   } else if (currentRound === 2) {
     currentRoundRule = 'none';
+    // Enable tutorial bubble for the second round: explain the R key.
     showingTutorial = true;
     tutorialMessage = 'Round 2: Press R to toggle reversed controls.';
   } else {
+    // From round 3 onward, the tutorial bubble is *never* shown.
     showingTutorial = false;
     tutorialMessage = '';
     // Randomly pick a playful rule tweak from round 3 onwards.
@@ -246,6 +284,9 @@ function generateRandomRoom() {
   const startOffsetX = 20;  // Very close to left wall
   playerX = ROOM_LEFT + startOffsetX;
   playerY = ROOM_TOP + (ROOM_HEIGHT - PLAYER_SIZE) / 2;
+  // Cache spawn so fake doors can snap the player back without side effects.
+  playerStartX = playerX;
+  playerStartY = playerY;
 
   // Door position: far right, creating a corridor-like path
   // Door is always on the right side, but vertical position varies
@@ -254,8 +295,13 @@ function generateRandomRoom() {
   doorX = ROOM_LEFT + ROOM_WIDTH - DOOR_WIDTH - doorOffsetX;
   doorY = ROOM_TOP + doorOffsetY;
 
+  // Clear any previous decoy exits; they will be regenerated each round.
+  // Reuse the same array to reduce allocations / GC churn.
+  fakeDoors.length = 0;
+
   // Generate obstacles: gradual scaling - starts with fewer during tutorials
-  obstacles = [];
+  // Reuse the same array to reduce allocations / GC churn.
+  obstacles.length = 0;
   // Round 1: 1 obstacle, Round 2: 2 obstacles, Round 3: 3, etc. (capped)
   const maxObstacles = 10;
   const baseForRound = currentRound === 1 ? 1 : currentRound === 2 ? 2 : 3 + (currentRound - 3);
@@ -328,6 +374,58 @@ function generateRandomRoom() {
       obstacles.push({ x: obsX, y: obsY, width: obsW, height: obsH, vx, vy, zigzagPhase });
     }
   }
+
+  // Generate fake doors / decoy exits from round 2 onward to support the "Uhm… nope" theme.
+  // These look like doors but simply reset the player back to spawn when touched.
+  if (currentRound >= 2) {
+    const numFakeDoors = currentRound === 2 ? 1 : 1 + Math.min(2, Math.floor((currentRound - 2) / 2));
+    const FAKE_DOOR_MARGIN = 40;
+
+    for (let i = 0; i < numFakeDoors; i++) {
+      let attempts = 0;
+      let valid = false;
+      let fx = 0;
+      let fy = 0;
+
+      while (!valid && attempts < 80) {
+        // Place fake doors near the right half of the room to mimic real exits.
+        const width = DOOR_WIDTH * 0.85;
+        const height = DOOR_HEIGHT * 0.85;
+        fx = ROOM_LEFT + ROOM_WIDTH / 2 + Math.random() * (ROOM_WIDTH / 2 - width - FAKE_DOOR_MARGIN);
+        fy = ROOM_TOP + Math.random() * (ROOM_HEIGHT - height - FAKE_DOOR_MARGIN);
+
+        // Avoid overlapping the true door.
+        const overlapsRealDoor =
+          fx + width > doorX - FAKE_DOOR_MARGIN &&
+          fx < doorX + DOOR_WIDTH + FAKE_DOOR_MARGIN &&
+          fy + height > doorY - FAKE_DOOR_MARGIN &&
+          fy < doorY + DOOR_HEIGHT + FAKE_DOOR_MARGIN;
+
+        // Avoid sitting directly on top of obstacles.
+        let overlapsObstacle = false;
+        for (const obs of obstacles) {
+          if (
+            fx + width > obs.x - 20 &&
+            fx < obs.x + obs.width + 20 &&
+            fy + height > obs.y - 20 &&
+            fy < obs.y + obs.height + 20
+          ) {
+            overlapsObstacle = true;
+            break;
+          }
+        }
+
+        if (!overlapsRealDoor && !overlapsObstacle) {
+          valid = true;
+        }
+        attempts++;
+      }
+
+      if (valid) {
+        fakeDoors.push({ x: fx, y: fy, width: DOOR_WIDTH * 0.85, height: DOOR_HEIGHT * 0.85 });
+      }
+    }
+  }
 }
 
 // ========== Input (keyboard) ==========
@@ -366,6 +464,8 @@ function handleKeyDown(e) {
     e.preventDefault();
     // If game is lost, restart; otherwise toggle reversed controls
     if (gameLost) {
+      // Cancel any pending "next round" timer and fully regenerate state.
+      clearPendingRoundTransition();
       currentRound = 1;
       generateRandomRoom();
       return;
@@ -441,6 +541,11 @@ function checkObstacleCollision() {
     if (px + ps > obs.x && px < obs.x + obs.width &&
         py + ps > obs.y && py < obs.y + obs.height) {
       gameLost = true;
+      // Tutorial tips should disappear as soon as a round is failed.
+      // This guarantees that when the next attempt/round starts, only the
+      // intended messages for that round (if any) will be re-enabled.
+      showingTutorial = false;
+      tutorialMessage = '';
       // Trigger a short, punchy screen shake and a humorous message.
       screenShakeTime = 300;      // ms
       screenShakeIntensity = 10;  // pixels
@@ -480,8 +585,17 @@ function checkDoorCollision() {
   if (px + ps > doorX && px < doorX + DOOR_WIDTH &&
       py + ps > doorY && py < doorY + DOOR_HEIGHT) {
     gameWon = true;
+    // As soon as the player finishes a tutorial round, clear tutorial text
+    // so it does not linger into the transition to the next round.
+    // This, combined with the `currentRound <= 2` guard in `drawUI`, ensures
+    // the speech bubble *never* appears in round 3+.
+    showingTutorial = false;
+    tutorialMessage = '';
     // After a short delay, advance to next round
-    setTimeout(() => {
+    clearPendingRoundTransition();
+    nextRoundTimeoutId = setTimeout(() => {
+      // We are now transitioning for real, so clear the handle.
+      nextRoundTimeoutId = null;
       currentRound++;
       generateRandomRoom();
     }, 1500);
@@ -511,8 +625,7 @@ function updateObstaclesMovement() {
   if (paused || gameWon || gameLost) return;
 
   // Estimate delta time for effects like teleport chance and zigzag wobble.
-  const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  // Use a simple clamp to avoid huge jumps when tab is unfocused.
+  // Use a fixed dt to avoid huge jumps when tab is unfocused.
   const dt = 1 / 60; // assuming ~60fps; enough for per-second probability approximations
 
   for (const obs of obstacles) {
@@ -574,6 +687,39 @@ function updateObstaclesMovement() {
   }
 }
 
+// ========== Fake door collision handling ==========
+/**
+ * Checks collision against fake doors / decoy exits.
+ * Touching a fake door does NOT kill the player; instead it snaps them back
+ * to their spawn location for the current round, reinforcing the "Uhm… nope"
+ * theme without being overly punishing.
+ */
+function checkFakeDoorCollision() {
+  if (paused || gameWon || gameLost) return;
+
+  const px = playerX;
+  const py = playerY;
+  const ps = PLAYER_SIZE;
+
+  for (const fd of fakeDoors) {
+    if (
+      px + ps > fd.x &&
+      px < fd.x + fd.width &&
+      py + ps > fd.y &&
+      py < fd.y + fd.height
+    ) {
+      // Soft "nope": teleport back to spawn.
+      playerX = playerStartX;
+      playerY = playerStartY;
+      // Tiny shake so the player feels something happened, but less intense
+      // than a lethal obstacle collision.
+      screenShakeTime = 160;
+      screenShakeIntensity = 5;
+      return;
+    }
+  }
+}
+
 // ========== Drawing (room, door, player, UI) ==========
 /**
  * Draws the room floor using AI-generated floor sprite (tiled).
@@ -585,7 +731,6 @@ function drawRoom() {
   let shakeOffsetY = 0;
   if (screenShakeTime > 0) {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const t = now % 1000;
     const intensity = screenShakeIntensity * (screenShakeTime / 300);
     shakeOffsetX = (Math.random() - 0.5) * intensity;
     shakeOffsetY = (Math.random() - 0.5) * intensity;
@@ -632,20 +777,32 @@ function drawRoom() {
     
     // Right wall
     for (let y = 0; y < CANVAS_HEIGHT; y += wallTileSize) {
-      ctx.drawImage(sprites.wall, CANVAS_WIDTH - ROOM_PADDING - W, y, ROOM_PADDING + W, wallTileSize);
+      ctx.drawImage(
+        sprites.wall,
+        CANVAS_WIDTH - ROOM_PADDING_X - W,
+        y,
+        ROOM_PADDING_X + W,
+        wallTileSize
+      );
     }
     
     // Bottom wall
     for (let x = 0; x < CANVAS_WIDTH; x += wallTileSize) {
-      ctx.drawImage(sprites.wall, x, CANVAS_HEIGHT - ROOM_PADDING - W, wallTileSize, ROOM_PADDING + W);
+      ctx.drawImage(
+        sprites.wall,
+        x,
+        CANVAS_HEIGHT - ROOM_PADDING_BOTTOM - W,
+        wallTileSize,
+        ROOM_PADDING_BOTTOM + W
+      );
     }
   } else {
     // Fallback: solid color walls
     ctx.fillStyle = '#0f3460';
     ctx.fillRect(0, 0, CANVAS_WIDTH, ROOM_TOP + W);
     ctx.fillRect(0, 0, ROOM_LEFT + W, CANVAS_HEIGHT);
-    ctx.fillRect(CANVAS_WIDTH - ROOM_PADDING - W, 0, ROOM_PADDING + W, CANVAS_HEIGHT);
-    ctx.fillRect(0, CANVAS_HEIGHT - ROOM_PADDING - W, CANVAS_WIDTH, ROOM_PADDING + W);
+    ctx.fillRect(CANVAS_WIDTH - ROOM_PADDING_X - W, 0, ROOM_PADDING_X + W, CANVAS_HEIGHT);
+    ctx.fillRect(0, CANVAS_HEIGHT - ROOM_PADDING_BOTTOM - W, CANVAS_WIDTH, ROOM_PADDING_BOTTOM + W);
   }
 
   ctx.restore();
@@ -719,16 +876,42 @@ function drawDoor() {
 }
 
 /**
+ * Draws fake doors / decoy exits.
+ * These use a distinct color and subtle "?" mark to hint that they're suspicious.
+ */
+function drawFakeDoors() {
+  for (const fd of fakeDoors) {
+    // Simple gradient block with teal-ish hue so they feel tempting.
+    const grad = ctx.createLinearGradient(fd.x, fd.y, fd.x, fd.y + fd.height);
+    grad.addColorStop(0, '#26c6da');
+    grad.addColorStop(1, '#004d60');
+    ctx.fillStyle = grad;
+    ctx.fillRect(fd.x, fd.y, fd.width, fd.height);
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(fd.x, fd.y, fd.width, fd.height);
+
+    // A small "?" so observant players can learn to distrust them.
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('?', fd.x + fd.width / 2, fd.y + fd.height / 2 + 7);
+  }
+}
+
+/**
  * Draws all obstacles using AI-generated obstacle sprite.
  * Falls back to gray rectangles if sprite isn't loaded.
  */
 function drawObstacles() {
+  // Compute tint once per frame (instead of once per obstacle) to reduce allocations.
+  const maxTintRounds = 10;
+  const roundFactor = Math.min(currentRound - 1, maxTintRounds) / maxTintRounds;
+  const tintAlpha = 0.15 + 0.25 * roundFactor; // 0.15 on early rounds, up to ~0.4 later
+  const tintColor = `rgba(233, 69, 96, ${tintAlpha})`; // Soft reddish tint
+
   for (const obs of obstacles) {
-    // Compute a subtle tint that becomes more saturated as rounds increase.
-    const maxTintRounds = 10;
-    const roundFactor = Math.min(currentRound - 1, maxTintRounds) / maxTintRounds;
-    const tintAlpha = 0.15 + 0.25 * roundFactor; // 0.15 on early rounds, up to ~0.4 later
-    const tintColor = `rgba(233, 69, 96, ${tintAlpha})`; // Soft reddish tint
 
     if (spritesReady && sprites.obstacle.complete && sprites.obstacle.naturalWidth > 0) {
       // Base sprite
@@ -900,27 +1083,72 @@ function drawUI() {
     ctx.fillText('Uhm… nope! Press R to restart', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 50);
   }
 
-  // Tutorial overlays for the first two rounds.
-  if (showingTutorial && !gameWon && !gameLost) {
+  // Tutorial speech bubble overlay for the *first two rounds only*.
+  // IMPORTANT: This bubble is intentionally drawn OUTSIDE the arena bounds
+  // (inside the reserved top HUD strip) so it never overlaps tiles, the player,
+  // obstacles, or door interactions.
+  //
+  // Guarded by both `showingTutorial` and `currentRound <= 2` so that:
+  //  - Round 1: shows movement instructions.
+  //  - Round 2: shows reversed-controls instructions.
+  //  - Round 3+: this block never runs, even if flags were accidentally left on.
+  if (showingTutorial && currentRound <= 2 && !gameWon && !gameLost) {
     ctx.save();
-    ctx.font = '20px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+
+    // Bubble geometry: right-aligned in the HUD strip so it won't overlap the round box.
     const boxWidth = 520;
     const boxHeight = 70;
-    const boxX = (CANVAS_WIDTH - boxWidth) / 2;
-    const boxY = 90;
-    ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 10);
-    ctx.fill();
+    const hudPadding = 18;
+    const boxX = CANVAS_WIDTH - boxWidth - hudPadding;
+    // Keep bubble fully above the arena: y + h <= ROOM_TOP - 6
+    const boxY = Math.max(hudPadding, ROOM_TOP - boxHeight - 6);
 
+    // Bubble styling
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.strokeStyle = 'rgba(78,205,196,0.9)';
+    ctx.lineWidth = 2;
+    ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    // Pointer/arrow: points from the bubble down toward the relevant in-arena object.
+    // For both tutorial rounds, the relevant object is the player (movement / control feel).
+    const playerCenterX = playerX + PLAYER_SIZE / 2;
+    const playerCenterY = playerY + PLAYER_SIZE / 2;
+
+    // Clamp pointer X so it stays on the bubble bottom edge.
+    const pointerBaseX = Math.max(boxX + 30, Math.min(boxX + boxWidth - 30, playerCenterX));
+    const pointerBaseY = boxY + boxHeight;
+    // Clamp pointer tip so it lands inside the arena (not on HUD).
+    const pointerTipX = Math.max(ROOM_LEFT + 10, Math.min(ROOM_LEFT + ROOM_WIDTH - 10, playerCenterX));
+    const pointerTipY = Math.max(ROOM_TOP + 10, Math.min(ROOM_TOP + ROOM_HEIGHT - 10, playerCenterY));
+
+    ctx.beginPath();
+    ctx.moveTo(pointerBaseX - 14, pointerBaseY - 1);
+    ctx.lineTo(pointerBaseX + 14, pointerBaseY - 1);
+    ctx.lineTo(pointerTipX, pointerTipY);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(78,205,196,0.6)';
+    ctx.stroke();
+
+    // Tutorial text
+    ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(tutorialMessage, CANVAS_WIDTH / 2, boxY + 28);
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(tutorialMessage, boxX + boxWidth / 2, boxY + 28);
 
     if (currentRound === 2) {
       ctx.font = '14px system-ui, sans-serif';
       ctx.fillStyle = '#ffeb3b';
-      ctx.fillText('Tip: The game will sometimes flip the rules… on purpose.', CANVAS_WIDTH / 2, boxY + 50);
+      ctx.fillText(
+        'Tip: The game will sometimes flip the rules… on purpose.',
+        boxX + boxWidth / 2,
+        boxY + 50
+      );
     }
+
     ctx.restore();
   }
 
@@ -976,12 +1204,12 @@ function gameLoop() {
     updatePlayer();
     updateObstaclesMovement();
     checkObstacleCollision();
+    checkFakeDoorCollision();
     checkDoorCollision();
 
     // Decay screen shake over time for smooth damping.
     if (screenShakeTime > 0) {
-      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-      // Assume ~16ms per frame for a simple linear decay.
+      // Simple linear decay tied loosely to frame updates (~60fps).
       screenShakeTime -= 16;
       if (screenShakeTime < 0) screenShakeTime = 0;
     }
@@ -989,6 +1217,7 @@ function gameLoop() {
 
   drawRoom();
   drawObstacles();
+  drawFakeDoors();
   drawDoor();
   drawPlayer();
   drawUI();
