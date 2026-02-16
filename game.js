@@ -123,7 +123,8 @@ let doorY = 0;
 // { x, y, width, height, vx, vy, zigzagPhase }
 let obstacles = [];
 // Fake doors / decoy exits that visually resemble exits but simply reset the player.
-// Each fake door is just a simple AABB: { x, y, width, height }.
+// Each decoy portal is a simple AABB with an effect type:
+// { x, y, width, height, effect: 'teleport' | 'shield' }.
 let fakeDoors = [];
 // Remember the player's spawn position so fake doors can reset the player cleanly.
 let playerStartX = 0;
@@ -132,6 +133,10 @@ let reversedControls = false;
 let gameWon = false;
 let gameLost = false;
 let doorUnlocked = false;  // Door only opens after survival time requirement
+
+// Shield buff granted by some Decoy Portals.
+// When active: the next obstacle collision destroys that obstacle and removes the shield.
+let shieldActive = false;
 
 // Pause state: when true, gameplay updates freeze but the current frame is still drawn.
 let paused = false;
@@ -224,6 +229,36 @@ function playReverseToggleSound() {
   }
 }
 
+/**
+ * Plays a short beep for shield activation/deactivation.
+ * Uses different pitches so the player can tell ON vs OFF.
+ */
+function playShieldSound(isActivating) {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    if (!audioCtx) audioCtx = new AudioContext();
+
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(isActivating ? 660 : 220, now);
+
+    gain.gain.setValueAtTime(0.0, now);
+    gain.gain.linearRampToValueAtTime(0.18, now + 0.01);
+    gain.gain.linearRampToValueAtTime(0.0, now + (isActivating ? 0.22 : 0.14));
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + (isActivating ? 0.26 : 0.18));
+  } catch (e) {
+    // Audio is optional; silently ignore failures.
+  }
+}
+
 // ========== Random room generation ==========
 /**
  * Generates a new random room layout:
@@ -242,6 +277,7 @@ function generateRandomRoom() {
   gameLost = false;
   doorUnlocked = false;
   reversedControls = false;
+  shieldActive = false; // Shield never carries across rounds.
   paused = false;       // Ensure new rounds always start unpaused
   pauseStartTime = 0;   // Reset pause timing helper
   roundStartTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -422,7 +458,11 @@ function generateRandomRoom() {
       }
 
       if (valid) {
-        fakeDoors.push({ x: fx, y: fy, width: DOOR_WIDTH * 0.85, height: DOOR_HEIGHT * 0.85 });
+        // Randomized portal effect:
+        // - teleport: snaps player back to spawn (original behavior)
+        // - shield: grants a one-hit shield that destroys an obstacle on contact
+        const effect = Math.random() < 0.5 ? 'teleport' : 'shield';
+        fakeDoors.push({ x: fx, y: fy, width: DOOR_WIDTH * 0.85, height: DOOR_HEIGHT * 0.85, effect });
       }
     }
   }
@@ -536,10 +576,24 @@ function checkObstacleCollision() {
   const py = playerY;
   const ps = PLAYER_SIZE;
 
-  for (const obs of obstacles) {
+  for (let i = 0; i < obstacles.length; i++) {
+    const obs = obstacles[i];
     // AABB overlap check
     if (px + ps > obs.x && px < obs.x + obs.width &&
         py + ps > obs.y && py < obs.y + obs.height) {
+      // If shield is active, consume it to destroy ONE obstacle instead of dying.
+      if (shieldActive) {
+        // Remove the obstacle from the round immediately.
+        obstacles.splice(i, 1);
+        shieldActive = false;
+
+        // Feedback: lighter shake + shield OFF sound.
+        screenShakeTime = 220;
+        screenShakeIntensity = 7;
+        playShieldSound(false);
+        return true;
+      }
+
       gameLost = true;
       // Tutorial tips should disappear as soon as a round is failed.
       // This guarantees that when the next attempt/round starts, only the
@@ -708,13 +762,22 @@ function checkFakeDoorCollision() {
       py + ps > fd.y &&
       py < fd.y + fd.height
     ) {
-      // Soft "nope": teleport back to spawn.
-      playerX = playerStartX;
-      playerY = playerStartY;
-      // Tiny shake so the player feels something happened, but less intense
-      // than a lethal obstacle collision.
-      screenShakeTime = 160;
-      screenShakeIntensity = 5;
+      if (fd.effect === 'shield') {
+        // Grant shield buff: lasts until the player collides with an obstacle.
+        shieldActive = true;
+        // Feedback: shield ON sound + distinct glow is drawn on the player.
+        playShieldSound(true);
+        screenShakeTime = 140;
+        screenShakeIntensity = 4;
+      } else {
+        // Teleport effect (original behavior): snap player back to spawn.
+        playerX = playerStartX;
+        playerY = playerStartY;
+        // Tiny shake so the player feels something happened, but less intense
+        // than a lethal obstacle collision.
+        screenShakeTime = 160;
+        screenShakeIntensity = 5;
+      }
       return;
     }
   }
@@ -881,10 +944,19 @@ function drawDoor() {
  */
 function drawFakeDoors() {
   for (const fd of fakeDoors) {
-    // Simple gradient block with teal-ish hue so they feel tempting.
+    // Visual language:
+    // - teleport portals are teal/blue with a ↩ icon
+    // - shield portals are green with a 🛡 icon
+    const isShield = fd.effect === 'shield';
     const grad = ctx.createLinearGradient(fd.x, fd.y, fd.x, fd.y + fd.height);
-    grad.addColorStop(0, '#26c6da');
-    grad.addColorStop(1, '#004d60');
+    if (isShield) {
+      grad.addColorStop(0, '#6dff7a');
+      grad.addColorStop(1, '#0a5a2a');
+    } else {
+      // Simple gradient block with teal-ish hue so they feel tempting.
+      grad.addColorStop(0, '#26c6da');
+      grad.addColorStop(1, '#004d60');
+    }
     ctx.fillStyle = grad;
     ctx.fillRect(fd.x, fd.y, fd.width, fd.height);
 
@@ -892,11 +964,11 @@ function drawFakeDoors() {
     ctx.lineWidth = 2;
     ctx.strokeRect(fd.x, fd.y, fd.width, fd.height);
 
-    // A small "?" so observant players can learn to distrust them.
+    // A small icon to teach portal effects without extra UI.
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 20px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('?', fd.x + fd.width / 2, fd.y + fd.height / 2 + 7);
+    ctx.fillText(isShield ? '🛡' : '↩', fd.x + fd.width / 2, fd.y + fd.height / 2 + 7);
   }
 }
 
@@ -956,8 +1028,9 @@ function drawObstacles() {
 function drawPlayer() {
   // Add a soft glow around the player sprite for readability.
   ctx.save();
-  ctx.shadowColor = 'rgba(78,205,196,0.9)';
-  ctx.shadowBlur = 18;
+  // Shield visual: brighter green glow + a ring around the player.
+  ctx.shadowColor = shieldActive ? 'rgba(109,255,122,0.95)' : 'rgba(78,205,196,0.9)';
+  ctx.shadowBlur = shieldActive ? 26 : 18;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
 
@@ -973,6 +1046,17 @@ function drawPlayer() {
   }
 
   ctx.restore();
+
+  // Extra shield indicator ring so it's unmistakable even on bright backgrounds.
+  if (shieldActive) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(109,255,122,0.9)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(playerX + PLAYER_SIZE / 2, playerY + PLAYER_SIZE / 2, PLAYER_SIZE * 0.75, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawUI() {
@@ -1062,6 +1146,31 @@ function drawUI() {
     ctx.fillStyle = '#ffeb3b';
     ctx.textAlign = 'left';
     ctx.fillText(text, boxX + paddingX, boxY + boxHeight - paddingY);
+    ctx.restore();
+  }
+
+  // Shield status badge (HUD): shows clearly when shield is active.
+  if (shieldActive && !gameWon && !gameLost) {
+    const text = 'Shield ACTIVE';
+    ctx.save();
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    const paddingX = 10;
+    const paddingY = 6;
+    const w = ctx.measureText(text).width + paddingX * 2;
+    const h = 24;
+    const x = 20;
+    const y = ROOM_TOP + 10; // just inside the arena edge so it's always visible
+
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeStyle = 'rgba(109,255,122,0.95)';
+    ctx.lineWidth = 2;
+    ctx.roundRect(x, y, w, h, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#b9ffbf';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, x + paddingX, y + h - paddingY);
     ctx.restore();
   }
 
