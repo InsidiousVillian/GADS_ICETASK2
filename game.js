@@ -193,6 +193,85 @@ function clearPendingRoundTransition() {
 // Lightweight Web Audio beep used when reversed controls toggle (manual + auto).
 let audioCtx = null;
 
+// ========== Background music (looping techno track) ==========
+// We deliberately keep background music separate from the lightweight Web Audio
+// beeps above. Music uses a single HTMLAudioElement that is treated as a
+// singleton to avoid duplicates across rounds/restarts.
+//
+// The actual audio file is generated procedurally by `generate_bgm_techno_loop.py`
+// and written to: assets/audio/music/bgm_techno_loop.wav
+//
+// Autoplay restrictions:
+// - Many browsers require a user gesture before playing audio.
+// - To respect this, we start music in response to the first non-ESC key press.
+const BGM_DEFAULT_VOLUME = 0.45;
+let bgmAudio = null;
+let bgmInitialized = false;
+let bgmFadeIntervalId = null;
+
+function initBackgroundMusic() {
+  if (bgmInitialized) return;
+  bgmInitialized = true;
+  try {
+    bgmAudio = new Audio('assets/audio/music/bgm_techno_loop.wav');
+    bgmAudio.loop = true;
+    bgmAudio.volume = BGM_DEFAULT_VOLUME;
+  } catch (e) {
+    // If Audio is not available for any reason, we simply skip music.
+    bgmAudio = null;
+  }
+}
+
+function startBackgroundMusic() {
+  if (!bgmInitialized) {
+    initBackgroundMusic();
+  }
+  if (!bgmAudio) return;
+
+  // If a previous fade-out was running, cancel it and restore volume.
+  if (bgmFadeIntervalId !== null) {
+    clearInterval(bgmFadeIntervalId);
+    bgmFadeIntervalId = null;
+  }
+  bgmAudio.volume = BGM_DEFAULT_VOLUME;
+
+  if (bgmAudio.paused) {
+    bgmAudio.play().catch(() => {
+      // Autoplay might still be blocked; we silently ignore and may retry
+      // on the next user interaction.
+    });
+  }
+}
+
+function fadeOutBackgroundMusic(durationMs = 800) {
+  if (!bgmAudio) return;
+
+  if (bgmFadeIntervalId !== null) {
+    clearInterval(bgmFadeIntervalId);
+    bgmFadeIntervalId = null;
+  }
+
+  const startVolume = bgmAudio.volume;
+  const steps = 24;
+  const stepDuration = durationMs / steps;
+  let step = 0;
+
+  bgmFadeIntervalId = setInterval(() => {
+    step++;
+    const t = step / steps;
+    const newVolume = startVolume * (1 - t);
+    bgmAudio.volume = Math.max(0, newVolume);
+
+    if (step >= steps) {
+      clearInterval(bgmFadeIntervalId);
+      bgmFadeIntervalId = null;
+      bgmAudio.pause();
+      // Reset volume so the next restart starts at the intended loudness.
+      bgmAudio.volume = BGM_DEFAULT_VOLUME;
+    }
+  }, stepDuration);
+}
+
 /**
  * Plays a short beep to signal that reversed controls have toggled.
  * This is optional and will silently fail if the browser blocks audio.
@@ -475,6 +554,12 @@ function handleKeyDown(e) {
   // Ignore auto-repeat to avoid rapidly toggling pause / reverse on held keys.
   if (e.repeat) return;
 
+  // Any non-ESC key press counts as a user gesture and is a good time to
+  // start background music if it is not already playing.
+  if (key !== 'escape') {
+    startBackgroundMusic();
+  }
+
   // ESC: toggle pause screen (only when the round is active).
   if (key === 'escape') {
     e.preventDefault();
@@ -594,6 +679,7 @@ function checkObstacleCollision() {
         return true;
       }
 
+      // Game over: mark loss, clear tutorial text, and gently fade out background music.
       gameLost = true;
       // Tutorial tips should disappear as soon as a round is failed.
       // This guarantees that when the next attempt/round starts, only the
@@ -603,6 +689,7 @@ function checkObstacleCollision() {
       // Trigger a short, punchy screen shake and a humorous message.
       screenShakeTime = 300;      // ms
       screenShakeIntensity = 10;  // pixels
+      fadeOutBackgroundMusic();
       return true;
     }
   }
